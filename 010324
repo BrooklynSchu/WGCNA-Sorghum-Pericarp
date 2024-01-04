@@ -1,0 +1,254 @@
+R.Version()
+#"R version 4.3.0 (2023-04-21 ucrt)"
+
+packageVersion("WGCNA") 
+#1.72.1’ version 
+
+library(WGCNA)
+library(flashClust)
+library(DESeq2)
+library(tidyverse)
+library(GEOquery)
+library(CorLevelPlot)
+library(gridExtra)
+
+getwd()
+options(stringsAsFactors = FALSE)
+
+#1. WGCNA file input and clsutering
+#gene expression file
+TPM = read.csv("Gene_expression_v5.1_filtered_corrected.csv", header = T) #Count matrix rows as genes columns as samples 
+rownames(TPM) = TPM$substanceBXH #name the rows as the genes 
+dim(TPM);
+TPM = TPM[ ,-c(1:2)] #take out the first two columns of gene names
+
+#import trait data
+traitData = read.csv("Phenotypic_data_v5.1_combined.csv", header = T)
+rownames(traitData)= traitData$ï..Sample #sample name as row name  
+
+gsg = goodSamplesGenes(TPM, verbose = 3);
+summary(gsg) #shows genes or samples that are outliers
+gsg$allOK #if TRUE all samples pass if FALSE they haven't
+
+TPM1 = as.data.frame(t(TPM))
+sampleTree = hclust(dist(TPM1), method = "average");
+sizeGrWindow(12,9)
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+
+alltraits = traitData[ , -1]
+collectGarbage();
+
+sampleTree2 = hclust(dist(TPM1), method = "average")
+traitColors = numbers2colors(alltraits, signed = FALSE);
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(alltraits),
+                    main = "Sample dendrogram and trait heatmap")
+
+#2 select power for matrix creation 
+powers = c(c(1:10), seq(from = 10, to=30, by=2))
+sft = pickSoftThreshold(TPM1, powerVector = powers, verbose = 5)
+
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.99;
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+abline(h=0.89,col="red")
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+softPower = 20;
+
+adjacency = adjacency(TPM1, power = softPower, type = "signed")
+TOM = TOMsimilarity(adjacency, TOMType="signed") # specify network type; # type = "signed" 
+dissTOM = 1-TOM
+
+geneTree = hclust(as.dist(dissTOM), method = "average");
+sizeGrWindow(12,9)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04);
+minModuleSize = 100;
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                            deepSplit = 2, pamRespectsDendro = FALSE,
+                            minClusterSize = minModuleSize)
+
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+sizeGrWindow(8,6)
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Gene dendrogram and module colors")
+
+MEList = moduleEigengenes(TPM1, colors = dynamicColors)
+MEs = MEList$eigengenes
+MEs1 = MEList$eigengenes
+MEDiss = 1-cor(MEs);
+METree = hclust(as.dist(MEDiss), method = "average");
+
+#3 mergeing colors based on module Eigengenes 
+sizeGrWindow(7, 6)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+MEDissThres = 0.25
+abline(h=MEDissThres, col = "red")
+merge = mergeCloseModules(TPM1, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+mergedColors = merge$colors;
+mergedMEs = merge$newMEs;
+sizeGrWindow(12, 9)
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+table(mergedColors)#new clusters 
+
+moduleColors = mergedColors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs;
+nGenes = ncol(TPM1);
+nSamples = nrow(TPM1);
+moduleTraitCor = cor(MEs, alltraits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+
+#Heatmap figure 
+sizeGrWindow(10,6)
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+rwb <- colorRampPalette(colors = c("yellow", "white", "red"))(n = 100);
+par(mar = c(6, 8.5, 3, 3));
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(alltraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = rwb,
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+weight = as.data.frame(alltraits$GS.Luteolinidin);
+names(weight) = "GS.Luteolinidin"
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(TPM1, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+geneTraitSignificance = as.data.frame(cor(TPM1, weight, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(weight), sep="");
+names(GSPvalue) = paste("p.GS.", names(weight), sep="");
+
+#select module of interest 
+module = "darkgrey"
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+
+#plot genes as scatterplot
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                   abs(geneTraitSignificance[moduleGenes, 1]),
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Gene significance for DFR.2",
+                   main = paste("Module membership vs. gene significance\n"),
+                   cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+
+#inport gene annotation file (file with only the genes used in the analysis after filtering out low TPM) 
+names(TPM1)[moduleColors=="darkgrey"]
+annot = read.csv(file = "Gene_Annotation_v5.1_combined.csv");
+annot= annot
+dim(annot)
+names(annot)
+probes = names(TPM1)
+probes2annot = match(probes, annot$ï..substanceBXH)
+sum(is.na(probes2annot))
+geneInfo0 = data.frame(substanceBXH = probes,
+                       geneSymbol = annot$gene_symbol[probes2annot],
+                       Annotation = annot$Annotation[probes2annot],
+                       moduleColor = moduleColors,
+                       geneTraitSignificance,
+                       GSPvalue)
+
+modOrder = order(-abs(cor(MEs, weight, use = "p")));
+for (mod in 1:ncol(geneModuleMembership))
+{
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+                         MMPvalue[, modOrder[mod]]);
+  names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+                       paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.7.MeO.API)); # if you get an error here, recall the column you want geneInfo0$GS.Luteolinidin
+geneInfo = geneInfo0[geneOrder, ]
+write.csv(geneInfo, file = "Output.csv")
+
+
+#export for visualization 
+colnames(annot)[1] = "substanceBXH"
+# Select module
+module = "darkgrey";
+# Select module probes
+probes = names(TPM1)
+inModule = (moduleColors== module);
+modProbes = probes[inModu
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+
+# Export the network into an edge list file VisANT can read
+DArkgrey= exportNetworkToVisANT(modTOM,
+                                    file = paste("BSVisANTInput-Cv5.1-", module, ".txt", sep=""),
+                                    weighted = TRUE,
+                                    threshold = 0, # you can change this and it will finter nodes (genes) by edge weight 0 is exporting all genes regartless of weight 
+                                    probeToGene = data.frame(rownames(geneInfo), geneInfo$substanceBXH))
+
+# Only top-# genes
+nTop = 100;
+IMConn = softConnectivity(TPM1[, modProbes]);
+top = (rank(-IMConn) <= nTop)
+vis = exportNetworkToVisANT(modTOM[top, top],
+                            file = paste("BSVisANTInput_hub-", module, "-top100_nothresh.txt", sep=""),
+                            weighted = TRUE,
+                            threshold = 0,
+                            probeToGene = data.frame(rownames(geneInfo), geneInfo$substanceBXH))
+
+probeToGene = data.frame(geneInfo$geneSymbol, geneInfo$LocusLinkID))
+
+
+# Select modules
+modules = c("darkgrey");
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = geneInfo$geneSymbol[match(modProbes, geneInfo$geneSymbol)];
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+
+dimnames(modTOM) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can directly read (same as lines 211-215)
+cyt = exportNetworkToCytoscape(modTOM[top, top],
+                               edgeFile = paste("CytoscapeInput-edges.BS24-", paste(modules, collapse="-"), ".txt", sep=""),
+                               nodeFile = paste("CytoscapeInput-nodes.BS24-", paste(modules, collapse="-"), ".txt", sep=""),
+                               weighted = TRUE,
+                               threshold = 0, # this is the edge weigth threashold 
+                               nodeNames = modProbes,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule]);
+
+      
+
+
+
+
+
